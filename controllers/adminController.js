@@ -518,9 +518,10 @@ exports.updatePaymentLocks = async (req, res) => {
 
 exports.triggerDailyIncrease = async (req, res) => {
   try {
-    await applyDailyIncrease();
-    return res.json({ message: 'Daily increase applied to all users' });
+    const results = await applyDailyIncrease();
+    return res.json({ message: 'Daily increase applied', results });
   } catch (err) {
+    console.error('[admin] triggerDailyIncrease failed:', err);
     return res.status(500).json({ message: err.message });
   }
 };

@@ -6,14 +6,17 @@ router.get('/daily-increase', async (req, res) => {
   if (secret) {
     const auth = req.headers.authorization || '';
     if (auth !== `Bearer ${secret}`) {
+      console.warn('[cron] unauthorized daily-increase call');
       return res.status(401).json({ message: 'Unauthorized' });
     }
   }
+
   try {
-    await applyDailyIncrease();
-    return res.json({ ok: true, message: 'Daily increase applied' });
+    const results = await applyDailyIncrease();
+    return res.json({ ok: true, message: 'Daily increase applied', results });
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    console.error('[cron] daily-increase failed:', err);
+    return res.status(500).json({ message: err.message || 'Cron failed' });
   }
 });
 
