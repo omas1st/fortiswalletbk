@@ -1,14 +1,34 @@
 const express = require('express');
 const cors = require('cors');
+const { isAllowedOrigin } = require('./config/cors');
 
 const app = express();
 
+// CORS middleware — runs before any route, allows the three production
+// domains + localhost, reflects the exact origin back (needed for credentials).
 app.use(
   cors({
-    origin: process.env.CLIENT_URL ? process.env.CLIENT_URL.split(',').map((s) => s.trim()) : '*',
+    origin(origin, cb) {
+      // no Origin header (curl, server-to-server, same-origin) — allow
+      if (!origin) return cb(null, true);
+      return cb(null, isAllowedOrigin(origin));
+    },
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-Requested-With',
+      'Accept',
+      'Origin',
+    ],
+    maxAge: 86400,
   })
 );
+
+// Fast-path OPTIONS in Express as a belt-and-suspenders fallback.
+// (api/index.js normally short-circuits this before Express is reached.)
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
