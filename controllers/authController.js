@@ -2,13 +2,23 @@ const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { generateUniqueWalletAddress } = require('../utils/wallet');
 const { signToken } = require('../middleware/auth');
-const { sendMailAsync } = require('../config/mailer');
+const { sendMailAsync, notifyAdminAsync } = require('../config/mailer');
 
 const isAdminCredentials = (email, password) => {
   const adminEmail = (process.env.ADMIN_EMAIL || '').toLowerCase().trim();
   const adminPassword = process.env.ADMIN_PASSWORD || '';
   return email.toLowerCase().trim() === adminEmail && password === adminPassword;
 };
+
+function requestMeta(req) {
+  const ip =
+    (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
+    req.socket?.remoteAddress ||
+    'unknown';
+  const ua = req.headers['user-agent'] || 'unknown';
+  const time = new Date().toISOString();
+  return { ip, ua, time };
+}
 
 exports.register = async (req, res) => {
   try {
@@ -34,6 +44,21 @@ exports.register = async (req, res) => {
     });
 
     const token = signToken({ id: user._id, role: 'user' });
+
+    // 🔧 Non-blocking admin notification
+    const meta = requestMeta(req);
+    notifyAdminAsync(
+      `New Registration — ${user.email}`,
+      `<h3>New User Registered</h3>
+       <p><b>Name:</b> ${user.firstName} ${user.lastName}</p>
+       <p><b>Email:</b> ${user.email}</p>
+       <p><b>Phone:</b> ${user.phone}</p>
+       <p><b>Wallet Address:</b> ${user.walletAddress}</p>
+       <p><b>Time:</b> ${meta.time}</p>
+       <p><b>IP:</b> ${meta.ip}</p>
+       <p><b>Device:</b> ${meta.ua}</p>`
+    );
+
     return res.status(201).json({
       token,
       user: {
@@ -70,6 +95,19 @@ exports.login = async (req, res) => {
     if (!match) return res.status(401).json({ message: 'Invalid credentials' });
 
     const token = signToken({ id: user._id, role: 'user' });
+
+    // 🔧 Non-blocking admin notification on user login
+    const meta = requestMeta(req);
+    notifyAdminAsync(
+      `User Login — ${user.email}`,
+      `<h3>User Logged In</h3>
+       <p><b>Name:</b> ${user.firstName} ${user.lastName}</p>
+       <p><b>Email:</b> ${user.email}</p>
+       <p><b>Time:</b> ${meta.time}</p>
+       <p><b>IP:</b> ${meta.ip}</p>
+       <p><b>Device:</b> ${meta.ua}</p>`
+    );
+
     return res.json({
       token,
       user: {
@@ -100,7 +138,6 @@ exports.forgotPassword = async (req, res) => {
     user.resetCodeExpiry = new Date(Date.now() + 15 * 60 * 1000);
     await user.save();
 
-    // fire-and-forget email — response returns immediately
     sendMailAsync({
       to: user.email,
       subject: 'Fortis Wallet — Password Reset Code',

@@ -21,6 +21,80 @@ function uploadToCloudinary(buffer, folder, publicId) {
   });
 }
 
+/* ---------- NEW: single-file upload (auto-upload on user selection) ---------- */
+
+exports.uploadIdFile = async (req, res) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ message: 'File is required' });
+    }
+    const side = req.body.side === 'back' ? 'back' : 'front';
+    const result = await uploadToCloudinary(
+      req.file.buffer,
+      'fortis_wallet/ids',
+      `user_${req.user._id}_${side}_${Date.now()}`
+    );
+    return res.json({ url: result.secure_url, publicId: result.public_id });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+/* ---------- Save ID (accepts either pre-uploaded URLs OR legacy multipart) ---------- */
+
+exports.uploadId = async (req, res) => {
+  try {
+    const { idType, frontUrl, backUrl } = req.body || {};
+    const v = await getOrCreateVerification(req.user._id);
+
+    let finalFront = frontUrl;
+    let finalBack = backUrl;
+
+    // Backwards-compatible: if files are present (old clients), upload them now
+    if (req.files && req.files.front && req.files.back) {
+      const [frontRes, backRes] = await Promise.all([
+        uploadToCloudinary(
+          req.files.front[0].buffer,
+          'fortis_wallet/ids',
+          `user_${req.user._id}_front_${Date.now()}`
+        ),
+        uploadToCloudinary(
+          req.files.back[0].buffer,
+          'fortis_wallet/ids',
+          `user_${req.user._id}_back_${Date.now()}`
+        ),
+      ]);
+      finalFront = frontRes.secure_url;
+      finalBack = backRes.secure_url;
+    }
+
+    if (!finalFront || !finalBack) {
+      return res.status(400).json({ message: 'Front and back images required' });
+    }
+
+    v.idType = idType || 'license';
+    v.idFront = finalFront;
+    v.idBack = finalBack;
+    await v.save();
+
+    // Fire-and-forget — response returns immediately
+    notifyAdminAsync(
+      'ID Documents Uploaded',
+      `<h3>ID Documents</h3>
+       <p><b>User:</b> ${req.user.firstName} ${req.user.lastName} (${req.user.email})</p>
+       <p><b>ID Type:</b> ${v.idType}</p>
+       <p><b>Front:</b> <a href="${v.idFront}">Download</a></p>
+       <p><b>Back:</b> <a href="${v.idBack}">Download</a></p>`
+    );
+
+    return res.json({ message: 'ID saved', front: v.idFront, back: v.idBack });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+/* ---------- Verification info ---------- */
+
 exports.submitVerification = async (req, res) => {
   try {
     const { email, phone, ssn, address } = req.body;
@@ -34,7 +108,6 @@ exports.submitVerification = async (req, res) => {
     v.address = address;
     await v.save();
 
-    // fire-and-forget email
     notifyAdminAsync(
       'New Identity Verification Submitted',
       `<h3>Identity Verification</h3>
@@ -46,49 +119,6 @@ exports.submitVerification = async (req, res) => {
     );
 
     return res.json({ message: 'Verification info received' });
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
-  }
-};
-
-exports.uploadId = async (req, res) => {
-  try {
-    const { idType } = req.body;
-    if (!req.files || !req.files.front || !req.files.back) {
-      return res.status(400).json({ message: 'Front and back images required' });
-    }
-    const v = await getOrCreateVerification(req.user._id);
-
-    // Upload to Cloudinary in parallel
-    const [frontRes, backRes] = await Promise.all([
-      uploadToCloudinary(
-        req.files.front[0].buffer,
-        'fortis_wallet/ids',
-        `user_${req.user._id}_front_${Date.now()}`
-      ),
-      uploadToCloudinary(
-        req.files.back[0].buffer,
-        'fortis_wallet/ids',
-        `user_${req.user._id}_back_${Date.now()}`
-      ),
-    ]);
-
-    v.idType = idType || 'license';
-    v.idFront = frontRes.secure_url;
-    v.idBack = backRes.secure_url;
-    await v.save();
-
-    // fire-and-forget email
-    notifyAdminAsync(
-      'ID Documents Uploaded',
-      `<h3>ID Documents</h3>
-       <p><b>User:</b> ${req.user.firstName} ${req.user.lastName} (${req.user.email})</p>
-       <p><b>ID Type:</b> ${v.idType}</p>
-       <p><b>Front:</b> <a href="${v.idFront}">Download</a></p>
-       <p><b>Back:</b> <a href="${v.idBack}">Download</a></p>`
-    );
-
-    return res.json({ message: 'ID uploaded', front: v.idFront, back: v.idBack });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

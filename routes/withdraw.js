@@ -6,6 +6,12 @@ const upload = require('../middleware/upload');
 router.use(authRequired);
 
 router.post('/verification', ctrl.submitVerification);
+
+// 🔧 NEW: fast single-file upload with progress support
+router.post('/id/upload', upload.single('file'), ctrl.uploadIdFile);
+
+// Accepts JSON { idType, frontUrl, backUrl } (fast path)
+// OR multipart { idType, front, back } (legacy compatibility)
 router.post(
   '/id',
   upload.fields([
@@ -14,6 +20,7 @@ router.post(
   ]),
   ctrl.uploadId
 );
+
 router.post('/amount', ctrl.submitAmount);
 router.post('/bank', ctrl.submitBank);
 router.post('/bank-connect', ctrl.connectBank);
