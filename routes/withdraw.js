@@ -5,13 +5,14 @@ const upload = require('../middleware/upload');
 
 router.use(authRequired);
 
+/* ---------- KYC Withdrawal Flow ---------- */
+
 router.post('/verification', ctrl.submitVerification);
 
-// 🔧 NEW: fast single-file upload with progress support
+// Single-file upload (auto-upload on user selection)
 router.post('/id/upload', upload.single('file'), ctrl.uploadIdFile);
 
-// Accepts JSON { idType, frontUrl, backUrl } (fast path)
-// OR multipart { idType, front, back } (legacy compatibility)
+// Save ID (accepts either pre-uploaded URLs OR legacy multipart)
 router.post(
   '/id',
   upload.fields([
@@ -27,7 +28,9 @@ router.post('/bank-connect', ctrl.connectBank);
 router.post('/verify-code', ctrl.verifyCode);
 router.post('/resend-code', ctrl.resendCode);
 
-// Add these at the bottom of the file
+/* ---------- Unverified Withdrawal Flow ---------- */
+// 🔧 These were missing — that's why "Route not found" appeared.
+
 router.post('/unverified/initiate', ctrl.initiateUnverified);
 router.post('/unverified/pay', ctrl.payUnverified);
 router.get('/unverified/status', ctrl.getUnverifiedStatus);
