@@ -7,7 +7,13 @@ async function seedAssetSettings() {
     // eslint-disable-next-line no-await-in-loop
     await AssetSetting.updateOne(
       { symbol: a.symbol },
-      { $setOnInsert: { symbol: a.symbol, name: a.name, percent: 1 } },
+      { 
+        $setOnInsert: { 
+          symbol: a.symbol, 
+          name: a.name, 
+          percent: 0.05 // 🔧 Updated default to 0.05
+        } 
+      },
       { upsert: true }
     );
   }
@@ -22,6 +28,7 @@ async function seedGlobalSettings() {
       paypalId: process.env.PAYPAL_ID || process.env.REACT_APP_PAYPAL_ID || 'payments@fortiswallet.com',
       cardLocked: false,
       paypalLocked: false,
+      giftCardLocked: false,
     });
     console.log('Global settings seeded');
   }

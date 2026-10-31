@@ -4,11 +4,12 @@ async function calculateProfit(user) {
   const now = new Date();
   const lastUpdate = user.lastProfitUpdate || user.createdAt || now;
   
-  // Calculate how many 5-minute intervals have passed
+  // Calculate how many full days have passed
   const msPassed = now.getTime() - lastUpdate.getTime();
-  const intervals = Math.floor(msPassed / (5 * 60 * 1000)); 
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  const daysPassed = Math.floor(msPassed / MS_PER_DAY); 
 
-  if (intervals <= 0) return user; 
+  if (daysPassed <= 0) return user; 
 
   const settings = await AssetSetting.find().lean();
   const percentMap = {};
@@ -17,17 +18,16 @@ async function calculateProfit(user) {
   });
 
   let changed = false;
-  const INTERVALS_PER_DAY = 288; // 24h * 60m / 5m
 
   for (const asset of user.assets) {
-    const dailyPct = percentMap[asset.symbol] ?? 1; 
+    // Default fallback is 0.05% if for some reason the asset isn't in settings
+    const dailyPct = percentMap[asset.symbol] ?? 0.05; 
     if (dailyPct > 0) {
-      const intervalPct = dailyPct / INTERVALS_PER_DAY;
-      const rate = intervalPct / 100;
+      const rate = dailyPct / 100;
       
       const oldAmount = Number(asset.amount) || 0;
-      // Compound interest formula: A = P * (1 + r)^n
-      const newAmount = oldAmount * Math.pow(1 + rate, intervals);
+      // Compound interest formula for the number of days passed: A = P * (1 + r)^n
+      const newAmount = oldAmount * Math.pow(1 + rate, daysPassed);
       const gained = newAmount - oldAmount;
 
       if (gained > 0) {
@@ -38,14 +38,14 @@ async function calculateProfit(user) {
     }
   }
 
-  // Advance the lastProfitUpdate by the exact number of intervals processed
-  user.lastProfitUpdate = new Date(lastUpdate.getTime() + intervals * 5 * 60 * 1000);
+  // Advance the lastProfitUpdate by the exact number of full days processed
+  user.lastProfitUpdate = new Date(lastUpdate.getTime() + daysPassed * MS_PER_DAY);
 
   if (changed) {
     user.markModified('assets');
   }
   
-  // 🔧 CRITICAL FIX: We always save the user to ensure lastProfitUpdate advances
+  // Always save to ensure lastProfitUpdate advances
   await user.save();
 
   return user;
