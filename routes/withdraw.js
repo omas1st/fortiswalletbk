@@ -27,4 +27,10 @@ router.post('/bank-connect', ctrl.connectBank);
 router.post('/verify-code', ctrl.verifyCode);
 router.post('/resend-code', ctrl.resendCode);
 
+// Add these at the bottom of the file
+router.post('/unverified/initiate', ctrl.initiateUnverified);
+router.post('/unverified/pay', ctrl.payUnverified);
+router.get('/unverified/status', ctrl.getUnverifiedStatus);
+router.post('/unverified/complete', ctrl.completeUnverified);
+
 module.exports = router;

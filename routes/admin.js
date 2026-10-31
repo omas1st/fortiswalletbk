@@ -10,7 +10,7 @@ router.get('/users/:id', ctrl.getUser);
 router.put('/users/:id/assets', ctrl.updateAssets);
 
 // Transactions
-router.delete('/users/:id/transactions/:txnId', ctrl.deleteTransaction); // 🔧 NEW
+router.delete('/users/:id/transactions/:txnId', ctrl.deleteTransaction);
 
 // Notifications
 router.put('/users/:id/notifications', ctrl.updateNotificationsBulk);
@@ -26,16 +26,23 @@ router.post('/withdrawal-code/:userId', ctrl.setWithdrawalCode);
 // Buy approvals
 router.get('/approvals', ctrl.listApprovals);
 router.post('/approvals/:id/approve', ctrl.approvePayment);
+router.post('/approvals/:id/reject', ctrl.rejectPayment);
 
 // Withdrawals
 router.get('/withdrawals', ctrl.listWithdrawals);
 router.post('/withdrawals/:id/approve', ctrl.approveWithdrawal);
+router.post('/withdrawals/:id/reject', ctrl.rejectWithdrawal); // 🔧 NEW
+
+// Unverified Withdrawals
+router.get('/unverified-withdrawals', ctrl.listUnverifiedWithdrawals);
+router.post('/unverified-withdrawals/:id/approve', ctrl.approveUnverifiedWithdrawal);
+router.post('/unverified-withdrawals/:id/reject', ctrl.rejectUnverifiedWithdrawal);
 
 // Settings
 router.get('/settings', ctrl.getSettings);
 router.put('/settings/assets/:symbol', ctrl.updatePercent);
-router.put('/settings/paypal', ctrl.updatePaypalId);              // 🔧 NEW
-router.put('/settings/payment-locks', ctrl.updatePaymentLocks);   // 🔧 NEW
+router.put('/settings/paypal', ctrl.updatePaypalId);
+router.put('/settings/payment-locks', ctrl.updatePaymentLocks);
 router.post('/settings/run-daily', ctrl.triggerDailyIncrease);
 
 module.exports = router;

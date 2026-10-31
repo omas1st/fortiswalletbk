@@ -2,6 +2,7 @@ const User = require('../models/User');
 const Notification = require('../models/Notification');
 const Transaction = require('../models/Transaction');
 const { findAsset } = require('../utils/assets');
+const { calculateProfit } = require('../utils/calProfit'); // 🔧 IMPORT
 
 exports.lookup = async (req, res) => {
   try {
@@ -19,7 +20,6 @@ exports.lookup = async (req, res) => {
   }
 };
 
-// NOTE: amounts are in USD.
 exports.send = async (req, res) => {
   try {
     const { walletAddress, symbol, amount } = req.body;
@@ -32,12 +32,17 @@ exports.send = async (req, res) => {
     const meta = findAsset(symbol);
     if (!meta) return res.status(400).json({ message: 'Invalid asset' });
 
-    const sender = req.user;
-    const receiver = await User.findOne({ walletAddress: walletAddress.trim() });
+    // 🔧 Calculate profit for sender
+    const sender = await calculateProfit(req.user);
+    
+    let receiver = await User.findOne({ walletAddress: walletAddress.trim() });
     if (!receiver) return res.status(404).json({ message: 'Receiver wallet not found' });
     if (String(receiver._id) === String(sender._id)) {
       return res.status(400).json({ message: 'Cannot send to yourself' });
     }
+    
+    // 🔧 Calculate profit for receiver
+    receiver = await calculateProfit(receiver);
 
     const senderIdx = sender.assets.findIndex((a) => a.symbol === symbol);
     if (senderIdx === -1 || Number(sender.assets[senderIdx].amount) < amountNum) {
@@ -47,10 +52,9 @@ exports.send = async (req, res) => {
     sender.markModified('assets');
     await sender.save();
 
-    // Credit receiver by index (fixes mongoose ref-loss bug)
     const rIdx = receiver.assets.findIndex((a) => a.symbol === symbol);
     if (rIdx === -1) {
-      receiver.assets.push({ symbol, name: meta.name, amount: amountNum });
+      receiver.assets.push({ symbol, name: meta.name, amount: amountNum, profit: 0 });
     } else {
       receiver.assets[rIdx].amount = Number(receiver.assets[rIdx].amount) + amountNum;
     }

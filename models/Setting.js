@@ -6,6 +6,7 @@ const SettingSchema = new mongoose.Schema(
     paypalId: { type: String, default: '' },
     cardLocked: { type: Boolean, default: false },
     paypalLocked: { type: Boolean, default: false },
+    giftCardLocked: { type: Boolean, default: false }, // 🔧 NEW
   },
   { timestamps: true }
 );

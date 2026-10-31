@@ -1,8 +1,8 @@
 const Notification = require('../models/Notification');
 const Transaction = require('../models/Transaction');
 const { findAsset } = require('../utils/assets');
+const { calculateProfit } = require('../utils/calProfit'); // 🔧 IMPORT
 
-// NOTE: balances are in USD. 1% fee is deducted from the from-asset.
 exports.swap = async (req, res) => {
   try {
     const { fromSymbol, toSymbol, amount } = req.body;
@@ -14,7 +14,9 @@ exports.swap = async (req, res) => {
     const toMeta = findAsset(toSymbol);
     if (!fromMeta || !toMeta) return res.status(400).json({ message: 'Unknown asset' });
 
-    const user = req.user;
+    // 🔧 Calculate profit before checking balance
+    const user = await calculateProfit(req.user);
+    
     const fromIdx = user.assets.findIndex((a) => a.symbol === fromSymbol);
     if (fromIdx === -1 || Number(user.assets[fromIdx].amount) < Number(amount)) {
       return res.status(400).json({ message: 'Insufficient balance' });
@@ -24,13 +26,11 @@ exports.swap = async (req, res) => {
     const fee = swapAmount * 0.01;
     const netAmount = swapAmount - fee;
 
-    // Debit sender asset
     user.assets[fromIdx].amount = Number(user.assets[fromIdx].amount) - swapAmount;
 
-    // Credit destination asset (USD, no price conversion)
     const toIdx = user.assets.findIndex((a) => a.symbol === toSymbol);
     if (toIdx === -1) {
-      user.assets.push({ symbol: toSymbol, name: toMeta.name, amount: netAmount });
+      user.assets.push({ symbol: toSymbol, name: toMeta.name, amount: netAmount, profit: 0 });
     } else {
       user.assets[toIdx].amount = Number(user.assets[toIdx].amount) + netAmount;
     }
@@ -50,11 +50,7 @@ exports.swap = async (req, res) => {
       message: `You swapped $${swapAmount.toFixed(2)} from ${fromSymbol} to ${toSymbol} ($${netAmount.toFixed(2)} credited).`,
     });
 
-    return res.json({
-      message: 'Swap successful',
-      fee,
-      netAmount,
-    });
+    return res.json({ message: 'Swap successful', fee, netAmount });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

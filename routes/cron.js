@@ -1,21 +1,12 @@
 const router = require('express').Router();
-const { applyDailyIncrease } = require('../utils/cron');
+const { applyIntervalIncrease } = require('../utils/cron');
 
-router.get('/daily-increase', async (req, res) => {
-  const secret = process.env.CRON_SECRET;
-  if (secret) {
-    const auth = req.headers.authorization || '';
-    if (auth !== `Bearer ${secret}`) {
-      console.warn('[cron] unauthorized daily-increase call');
-      return res.status(401).json({ message: 'Unauthorized' });
-    }
-  }
-
+router.get('/increase', async (req, res) => {
   try {
-    const results = await applyDailyIncrease();
-    return res.json({ ok: true, message: 'Daily increase applied', results });
+    const results = await applyIntervalIncrease();
+    return res.json({ ok: true, message: 'Increase applied', results });
   } catch (err) {
-    console.error('[cron] daily-increase failed:', err);
+    console.error('[cron] increase failed:', err);
     return res.status(500).json({ message: err.message || 'Cron failed' });
   }
 });

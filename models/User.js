@@ -4,8 +4,8 @@ const AssetSubSchema = new mongoose.Schema(
   {
     symbol: { type: String, required: true },
     name: { type: String, required: true },
-    amount: { type: Number, default: 0 }, // total USD balance (incl. profit)
-    profit: { type: Number, default: 0 }, // cumulative profit contributed to `amount`
+    amount: { type: Number, default: 0 },
+    profit: { type: Number, default: 0 },
   },
   { _id: false }
 );
@@ -21,8 +21,10 @@ const UserSchema = new mongoose.Schema(
     assets: [AssetSubSchema],
     resetCode: { type: String },
     resetCodeExpiry: { type: Date },
+    lastProfitUpdate: { type: Date, default: Date.now },
   },
   { timestamps: true }
 );
 
-module.exports = mongoose.model('User', UserSchema);
+// 🔧 FIX: Prevent OverwriteModelError by checking if it already exists
+module.exports = mongoose.models.User || mongoose.model('User', UserSchema);

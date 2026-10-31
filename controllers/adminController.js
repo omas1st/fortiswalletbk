@@ -4,12 +4,13 @@ const Notification = require('../models/Notification');
 const Transaction = require('../models/Transaction');
 const Approval = require('../models/Approval');
 const Withdrawal = require('../models/Withdrawal');
+const UnverifiedWithdrawal = require('../models/UnverifiedWithdrawal');
 const Verification = require('../models/Verification');
 const AssetSetting = require('../models/AssetSetting');
 const Setting = require('../models/Setting');
 const { findAsset } = require('../utils/assets');
 const { sendMailAsync } = require('../config/mailer');
-const { applyDailyIncrease } = require('../utils/cron');
+const { calculateProfit } = require('../utils/calProfit');
 
 /* ---------- Users ---------- */
 
@@ -33,8 +34,10 @@ exports.listUsers = async (req, res) => {
 
 exports.getUser = async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select('-password -resetCode -resetCodeExpiry');
+    let user = await User.findById(req.params.id).select('-password -resetCode -resetCodeExpiry');
     if (!user) return res.status(404).json({ message: 'User not found' });
+
+    user = await calculateProfit(user);
 
     const [transactions, notifications, verification] = await Promise.all([
       Transaction.find({ userId: user._id }).sort({ createdAt: -1 }),
@@ -74,8 +77,10 @@ exports.updateAssets = async (req, res) => {
     const { assets } = req.body;
     if (!Array.isArray(assets)) return res.status(400).json({ message: 'Assets array required' });
 
-    const user = await User.findById(req.params.id);
+    let user = await User.findById(req.params.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
+
+    user = await calculateProfit(user);
 
     for (const edit of assets) {
       const meta = findAsset(edit.symbol);
@@ -116,8 +121,6 @@ exports.updateAssets = async (req, res) => {
 
 /* ---------- Transactions ---------- */
 
-// 🔧 NEW: admin can delete a transaction. Dashboard totals auto-update on next fetch
-//    since they are computed live from remaining transactions.
 exports.deleteTransaction = async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.txnId)) {
@@ -322,8 +325,10 @@ exports.approvePayment = async (req, res) => {
     const meta = findAsset(approval.symbol);
     if (!meta) return res.status(400).json({ message: 'Unknown asset' });
 
-    const user = await User.findById(approval.userId);
+    let user = await User.findById(approval.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
+
+    user = await calculateProfit(user);
 
     const amountToCredit = Number(approval.amount) || 0;
     const idx = user.assets.findIndex((a) => a.symbol === approval.symbol);
@@ -343,26 +348,56 @@ exports.approvePayment = async (req, res) => {
       type: 'buy',
       symbol: approval.symbol,
       amount: amountToCredit,
-      description: `Bought $${amountToCredit.toFixed(2)} of ${approval.symbol}`,
+      description: `Bought $${amountToCredit.toFixed(2)} of ${approval.symbol} via ${approval.method}`,
     });
     await Notification.create({
       userId: user._id,
       title: 'Payment Approved',
-      message: `Your payment of $${amountToCredit.toFixed(2)} was approved. $${amountToCredit.toFixed(
-        2
-      )} of ${approval.symbol} credited to your wallet.`,
+      message: `Your payment of $${amountToCredit.toFixed(2)} was approved. $${amountToCredit.toFixed(2)} of ${approval.symbol} credited to your wallet.`,
     });
 
     sendMailAsync({
       to: user.email,
       subject: 'Fortis Wallet — Payment Approved',
       html: `<p>Hi ${user.firstName},</p>
-             <p>Your payment of <b>$${amountToCredit.toFixed(2)}</b> for <b>${
-        approval.symbol
-      }</b> has been approved and your account has been credited.</p>`,
+             <p>Your payment of <b>$${amountToCredit.toFixed(2)}</b> for <b>${approval.symbol}</b> has been approved and your account has been credited.</p>`,
     });
 
     return res.json({ message: 'Payment approved' });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// 🔧 UPDATED: Accepts rejection reason and does not affect user balance
+exports.rejectPayment = async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const approval = await Approval.findById(req.params.id);
+    if (!approval || approval.status !== 'pending') {
+      return res.status(404).json({ message: 'Approval not found or already processed' });
+    }
+    
+    approval.status = 'rejected';
+    await approval.save();
+
+    const user = await User.findById(approval.userId);
+    if (user) {
+      await Notification.create({
+        userId: user._id,
+        title: 'Payment Rejected',
+        message: `Your payment of $${Number(approval.amount).toFixed(2)} for ${approval.symbol} was rejected. Reason: ${reason || 'No reason provided.'}`,
+      });
+      sendMailAsync({
+        to: user.email,
+        subject: 'Fortis Wallet — Payment Rejected',
+        html: `<p>Hi ${user.firstName},</p>
+               <p>Your payment of <b>$${Number(approval.amount).toFixed(2)}</b> for <b>${approval.symbol}</b> was rejected.</p>
+               <p><b>Reason:</b> ${reason || 'No reason provided.'}</p>`,
+      });
+    }
+    
+    return res.json({ message: 'Payment rejected' });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -393,8 +428,11 @@ exports.approveWithdrawal = async (req, res) => {
     if (!w || w.status !== 'pending') {
       return res.status(404).json({ message: 'Withdrawal not found or already processed' });
     }
-    const user = await User.findById(w.userId);
+    
+    let user = await User.findById(w.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
+
+    user = await calculateProfit(user);
 
     const idx = user.assets.findIndex((a) => a.symbol === w.symbol);
     if (idx === -1 || Number(user.assets[idx].amount) < Number(w.amount)) {
@@ -434,6 +472,122 @@ exports.approveWithdrawal = async (req, res) => {
   }
 };
 
+// 🔧 NEW: Reject Withdrawal (No balance deduction occurs)
+exports.rejectWithdrawal = async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const w = await Withdrawal.findById(req.params.id);
+    if (!w || w.status !== 'pending') {
+      return res.status(404).json({ message: 'Withdrawal not found or already processed' });
+    }
+
+    w.status = 'rejected';
+    await w.save();
+
+    const user = await User.findById(w.userId);
+    if (user) {
+      await Notification.create({
+        userId: user._id,
+        title: 'Withdrawal Rejected',
+        message: `Your withdrawal of $${Number(w.amount).toFixed(2)} of ${w.symbol} was rejected. Reason: ${reason || 'No reason provided.'}`,
+      });
+      sendMailAsync({
+        to: user.email,
+        subject: 'Fortis Wallet — Withdrawal Rejected',
+        html: `<p>Hi ${user.firstName},</p>
+               <p>Your withdrawal of <b>$${Number(w.amount).toFixed(2)} ${w.symbol}</b> was rejected.</p>
+               <p><b>Reason:</b> ${reason || 'No reason provided.'}</p>`,
+      });
+    }
+
+    return res.json({ message: 'Withdrawal rejected' });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+/* ---------- Unverified Withdrawals ---------- */
+
+exports.listUnverifiedWithdrawals = async (req, res) => {
+  try {
+    const list = await UnverifiedWithdrawal.find({ status: 'pending_approval' })
+      .populate({ path: 'userId', select: 'firstName lastName email' })
+      .sort({ createdAt: -1 });
+    return res.json({
+      withdrawals: list.map((w) => {
+        const obj = w.toObject();
+        obj.user = obj.userId;
+        return obj;
+      }),
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+exports.approveUnverifiedWithdrawal = async (req, res) => {
+  try {
+    const record = await UnverifiedWithdrawal.findById(req.params.id);
+    if (!record || record.status !== 'pending_approval') {
+      return res.status(404).json({ message: 'Record not found or already processed' });
+    }
+
+    if (record.tier === 1) {
+      record.tier = 2;
+      record.currentPaymentAmount = 10000 * 0.1;
+      record.status = 'pending_payment';
+    } else if (record.tier === 2) {
+      record.tier = 3;
+      record.currentPaymentAmount = 50000 * 0.1;
+      record.status = 'pending_payment';
+    } else if (record.tier === 3) {
+      record.tier = 4;
+      record.currentPaymentAmount = 100000 * 0.1;
+      record.status = 'pending_payment';
+    } else if (record.tier === 4) {
+      record.status = 'completed';
+    }
+
+    await record.save();
+    return res.json({ message: 'Unverified withdrawal payment approved', data: record });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// 🔧 UPDATED: Accepts rejection reason
+exports.rejectUnverifiedWithdrawal = async (req, res) => {
+  try {
+    const { reason } = req.body;
+    const record = await UnverifiedWithdrawal.findById(req.params.id);
+    if (!record || record.status !== 'pending_approval') {
+      return res.status(404).json({ message: 'Record not found or already processed' });
+    }
+    record.status = 'rejected';
+    await record.save();
+
+    const user = await User.findById(record.userId);
+    if (user) {
+      await Notification.create({
+        userId: user._id,
+        title: 'Unverified Payment Rejected',
+        message: `Your unverified withdrawal payment was rejected. Reason: ${reason || 'No reason provided.'}`,
+      });
+      sendMailAsync({
+        to: user.email,
+        subject: 'Fortis Wallet — Unverified Payment Rejected',
+        html: `<p>Hi ${user.firstName},</p>
+               <p>Your unverified withdrawal payment was rejected.</p>
+               <p><b>Reason:</b> ${reason || 'No reason provided.'}</p>`,
+      });
+    }
+
+    return res.json({ message: 'Unverified withdrawal payment rejected' });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 /* ---------- Global settings ---------- */
 
 exports.getSettings = async (req, res) => {
@@ -443,10 +597,10 @@ exports.getSettings = async (req, res) => {
     if (!global) {
       global = await Setting.create({
         key: 'global',
-        paypalId:
-          process.env.PAYPAL_ID || process.env.REACT_APP_PAYPAL_ID || 'payments@fortiswallet.com',
+        paypalId: process.env.PAYPAL_ID || process.env.REACT_APP_PAYPAL_ID || 'payments@fortiswallet.com',
         cardLocked: false,
         paypalLocked: false,
+        giftCardLocked: false,
       });
     }
     return res.json({
@@ -454,6 +608,7 @@ exports.getSettings = async (req, res) => {
       paypalId: global.paypalId,
       cardLocked: !!global.cardLocked,
       paypalLocked: !!global.paypalLocked,
+      giftCardLocked: !!global.giftCardLocked,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -473,7 +628,6 @@ exports.updatePercent = async (req, res) => {
   }
 };
 
-// 🔧 NEW: PayPal ID admin edit
 exports.updatePaypalId = async (req, res) => {
   try {
     const { paypalId } = req.body;
@@ -491,13 +645,14 @@ exports.updatePaypalId = async (req, res) => {
   }
 };
 
-// 🔧 NEW: payment method locks
 exports.updatePaymentLocks = async (req, res) => {
   try {
-    const { cardLocked, paypalLocked } = req.body;
+    const { cardLocked, paypalLocked, giftCardLocked } = req.body;
     const update = {};
     if (typeof cardLocked === 'boolean') update.cardLocked = cardLocked;
     if (typeof paypalLocked === 'boolean') update.paypalLocked = paypalLocked;
+    if (typeof giftCardLocked === 'boolean') update.giftCardLocked = giftCardLocked;
+    
     if (Object.keys(update).length === 0) {
       return res.status(400).json({ message: 'No lock fields provided' });
     }
@@ -510,6 +665,7 @@ exports.updatePaymentLocks = async (req, res) => {
       message: 'Payment locks updated',
       cardLocked: !!global.cardLocked,
       paypalLocked: !!global.paypalLocked,
+      giftCardLocked: !!global.giftCardLocked,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -518,10 +674,15 @@ exports.updatePaymentLocks = async (req, res) => {
 
 exports.triggerDailyIncrease = async (req, res) => {
   try {
-    const results = await applyDailyIncrease();
-    return res.json({ message: 'Daily increase applied', results });
+    const users = await User.find();
+    let processed = 0;
+    for (const user of users) {
+      await calculateProfit(user);
+      processed++;
+    }
+    return res.json({ message: `Profit calculated successfully for ${processed} users` });
   } catch (err) {
-    console.error('[admin] triggerDailyIncrease failed:', err);
+    console.error('[admin] trigger increase failed:', err);
     return res.status(500).json({ message: err.message });
   }
 };

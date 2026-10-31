@@ -2,8 +2,8 @@ const bcrypt = require('bcryptjs');
 const Notification = require('../models/Notification');
 const Transaction = require('../models/Transaction');
 const { findAsset } = require('../utils/assets');
+const { calculateProfit } = require('../utils/calProfit'); // 🔧 IMPORT
 
-// user.assets[i].amount = total USD balance (incl. profit); .profit = cumulative profit.
 async function buildDashboard(user) {
   const assets = (user.assets || []).map((a) => ({
     symbol: a.symbol,
@@ -43,7 +43,9 @@ async function buildDashboard(user) {
 
 exports.getDashboard = async (req, res) => {
   try {
-    const dashboard = await buildDashboard(req.user);
+    // 🔧 Calculate profit before showing dashboard
+    const updatedUser = await calculateProfit(req.user);
+    const dashboard = await buildDashboard(updatedUser);
     return res.json(dashboard);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -56,13 +58,13 @@ exports.addAsset = async (req, res) => {
     const meta = findAsset(symbol);
     if (!meta) return res.status(400).json({ message: 'Unknown asset symbol' });
 
-    const user = req.user;
-    const existing = user.assets.find((a) => a.symbol === symbol);
-    if (existing) return res.json({ message: 'Asset already added', assets: user.assets });
+    const updatedUser = await calculateProfit(req.user); // 🔧 Calculate before modifying
+    const existing = updatedUser.assets.find((a) => a.symbol === symbol);
+    if (existing) return res.json({ message: 'Asset already added', assets: updatedUser.assets });
 
-    user.assets.push({ symbol, name: meta.name, amount: 0, profit: 0 });
-    await user.save();
-    return res.json({ message: 'Asset added', assets: user.assets });
+    updatedUser.assets.push({ symbol, name: meta.name, amount: 0, profit: 0 });
+    await updatedUser.save();
+    return res.json({ message: 'Asset added', assets: updatedUser.assets });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

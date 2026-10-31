@@ -3,6 +3,7 @@ const ctrl = require('../controllers/userController');
 const { authRequired } = require('../middleware/auth');
 
 router.use(authRequired);
+
 router.get('/dashboard', ctrl.getDashboard);
 router.post('/assets', ctrl.addAsset);
 router.get('/notifications', ctrl.getNotifications);
