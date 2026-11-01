@@ -369,7 +369,6 @@ exports.approvePayment = async (req, res) => {
   }
 };
 
-// 🔧 UPDATED: Accepts rejection reason and does not affect user balance
 exports.rejectPayment = async (req, res) => {
   try {
     const { reason } = req.body;
@@ -472,7 +471,6 @@ exports.approveWithdrawal = async (req, res) => {
   }
 };
 
-// 🔧 NEW: Reject Withdrawal (No balance deduction occurs)
 exports.rejectWithdrawal = async (req, res) => {
   try {
     const { reason } = req.body;
@@ -508,9 +506,10 @@ exports.rejectWithdrawal = async (req, res) => {
 
 /* ---------- Unverified Withdrawals ---------- */
 
+// 🔧 UPDATED: Fetch records that have ANY pending payments
 exports.listUnverifiedWithdrawals = async (req, res) => {
   try {
-    const list = await UnverifiedWithdrawal.find({ status: 'pending_approval' })
+    const list = await UnverifiedWithdrawal.find({ 'payments.status': 'pending' })
       .populate({ path: 'userId', select: 'firstName lastName email' })
       .sort({ createdAt: -1 });
     return res.json({
@@ -525,45 +524,80 @@ exports.listUnverifiedWithdrawals = async (req, res) => {
   }
 };
 
-exports.approveUnverifiedWithdrawal = async (req, res) => {
+// 🔧 UPDATED: Approve a specific payment batch
+exports.approveUnverifiedPayment = async (req, res) => {
   try {
-    const record = await UnverifiedWithdrawal.findById(req.params.id);
-    if (!record || record.status !== 'pending_approval') {
-      return res.status(404).json({ message: 'Record not found or already processed' });
+    const { withdrawalId, paymentId } = req.params;
+    const record = await UnverifiedWithdrawal.findById(withdrawalId);
+    if (!record) return res.status(404).json({ message: 'Record not found' });
+
+    const payment = record.payments.id(paymentId);
+    if (!payment || payment.status !== 'pending') {
+      return res.status(404).json({ message: 'Payment not found or already processed' });
     }
 
-    if (record.tier === 1) {
-      record.tier = 2;
-      record.currentPaymentAmount = 10000 * 0.1;
-      record.status = 'pending_payment';
-    } else if (record.tier === 2) {
-      record.tier = 3;
-      record.currentPaymentAmount = 50000 * 0.1;
-      record.status = 'pending_payment';
-    } else if (record.tier === 3) {
-      record.tier = 4;
-      record.currentPaymentAmount = 100000 * 0.1;
-      record.status = 'pending_payment';
-    } else if (record.tier === 4) {
-      record.status = 'completed';
-    }
+    payment.status = 'approved';
+    
+    // Recalculate total approved
+    record.totalFeesPaid = record.payments
+      .filter(p => p.status === 'approved')
+      .reduce((sum, p) => sum + p.amount, 0);
 
+    // If fully approved, move to next tier or complete
+    if (record.totalFeesPaid >= record.currentPaymentAmount) {
+      if (record.tier === 1) {
+        record.tier = 2;
+        record.currentPaymentAmount = 10000 * 0.1;
+        record.status = 'pending_payment';
+      } else if (record.tier === 2) {
+        record.tier = 3;
+        record.currentPaymentAmount = 50000 * 0.1;
+        record.status = 'pending_payment';
+      } else if (record.tier === 3) {
+        record.tier = 4;
+        record.currentPaymentAmount = 100000 * 0.1;
+        record.status = 'pending_payment';
+      } else if (record.tier === 4) {
+        record.status = 'completed';
+      }
+    }
+    
     await record.save();
-    return res.json({ message: 'Unverified withdrawal payment approved', data: record });
+    return res.json({ message: 'Payment approved', data: record });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
 };
 
-// 🔧 UPDATED: Accepts rejection reason
-exports.rejectUnverifiedWithdrawal = async (req, res) => {
+// 🔧 UPDATED: Reject a specific payment batch
+exports.rejectUnverifiedPayment = async (req, res) => {
   try {
     const { reason } = req.body;
-    const record = await UnverifiedWithdrawal.findById(req.params.id);
-    if (!record || record.status !== 'pending_approval') {
-      return res.status(404).json({ message: 'Record not found or already processed' });
+    const { withdrawalId, paymentId } = req.params;
+    const record = await UnverifiedWithdrawal.findById(withdrawalId);
+    if (!record) return res.status(404).json({ message: 'Record not found' });
+
+    const payment = record.payments.id(paymentId);
+    if (!payment || payment.status !== 'pending') {
+      return res.status(404).json({ message: 'Payment not found or already processed' });
     }
-    record.status = 'rejected';
+
+    payment.status = 'rejected';
+    
+    // Recalculate approved total
+    record.totalFeesPaid = record.payments
+      .filter(p => p.status === 'approved')
+      .reduce((sum, p) => sum + p.amount, 0);
+
+    // Since a payment was rejected, they likely need to pay again.
+    const totalSubmitted = record.payments
+      .filter(p => p.status !== 'rejected')
+      .reduce((sum, p) => sum + p.amount, 0);
+
+    if (totalSubmitted < record.currentPaymentAmount) {
+      record.status = 'pending_payment';
+    }
+
     await record.save();
 
     const user = await User.findById(record.userId);
@@ -571,18 +605,19 @@ exports.rejectUnverifiedWithdrawal = async (req, res) => {
       await Notification.create({
         userId: user._id,
         title: 'Unverified Payment Rejected',
-        message: `Your unverified withdrawal payment was rejected. Reason: ${reason || 'No reason provided.'}`,
+        message: `Your unverified withdrawal payment of $${payment.amount.toFixed(2)} was rejected. Reason: ${reason || 'No reason provided.'}`,
       });
       sendMailAsync({
         to: user.email,
         subject: 'Fortis Wallet — Unverified Payment Rejected',
         html: `<p>Hi ${user.firstName},</p>
-               <p>Your unverified withdrawal payment was rejected.</p>
-               <p><b>Reason:</b> ${reason || 'No reason provided.'}</p>`,
+               <p>Your unverified withdrawal payment of <b>$${payment.amount.toFixed(2)}</b> was rejected.</p>
+               <p><b>Reason:</b> ${reason || 'No reason provided.'}</p>
+               <p>Please log in to submit a new payment.</p>`,
       });
     }
 
-    return res.json({ message: 'Unverified withdrawal payment rejected' });
+    return res.json({ message: 'Payment rejected', data: record });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

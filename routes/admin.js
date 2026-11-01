@@ -42,8 +42,8 @@ router.post('/withdrawals/:id/reject', ctrl.rejectWithdrawal);
 /* ---------- Unverified Withdrawals ---------- */
 
 router.get('/unverified-withdrawals', ctrl.listUnverifiedWithdrawals);
-router.post('/unverified-withdrawals/:id/approve', ctrl.approveUnverifiedWithdrawal);
-router.post('/unverified-withdrawals/:id/reject', ctrl.rejectUnverifiedWithdrawal);
+router.post('/unverified-withdrawals/:withdrawalId/payments/:paymentId/approve', ctrl.approveUnverifiedPayment); // 🔧 UPDATED
+router.post('/unverified-withdrawals/:withdrawalId/payments/:paymentId/reject', ctrl.rejectUnverifiedPayment);   // 🔧 UPDATED
 
 /* ---------- Global Settings ---------- */
 

